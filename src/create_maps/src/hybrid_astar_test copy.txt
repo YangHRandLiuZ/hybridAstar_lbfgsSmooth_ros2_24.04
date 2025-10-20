@@ -61,9 +61,9 @@ public:
         goal_sub_options.callback_group = goal_callback_group;
         
         goal_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-            "/move_base_simple/goal", 
-    rclcpp::QoS(rclcpp::KeepLast(10)).reliable(),  // 显式配置可靠传输
-    std::bind(&HybridAstarNode::goalCallback, this, std::placeholders::_1)
+            "/move_base_simple/goal", 10,
+            std::bind(&HybridAstarNode::goalCallback, this, std::placeholders::_1),
+            goal_sub_options
         );
 
         path_vis_pub_ = this->create_publisher<nav_msgs::msg::Path>("/path", 10);
@@ -115,9 +115,6 @@ private:
     }
 
     void run() {
-            RCLCPP_DEBUG(this->get_logger(), "run() called");  // 调试日志
-    if (has_start_ && has_goal_) {
-
         // 增加状态检查日志
         if (!has_start_) {
             RCLCPP_DEBUG(this->get_logger(), "Waiting for start position");
@@ -186,7 +183,6 @@ private:
             } else {
                 RCLCPP_WARN(this->get_logger(), "Search failed");
             }
-        }
         }
     }
 

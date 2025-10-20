@@ -1,0 +1,27 @@
+# 编译目录（必须添加，否则仓库会很大）
+build/
+install/
+log/
+
+# 系统/编辑器临时文件
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# 编译生成的二进制文件
+*.o
+*.so
+*.a
+*.exe
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# ROS 2 自动生成的文件
+*.msg
+*.srv
+*.action

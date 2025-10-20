@@ -1,317 +1,202 @@
-#include <ros/ros.h>
-#include <nav_msgs/Path.h>
-#include <visualization_msgs/Marker.h>
+#include "rclcpp/rclcpp.hpp"
+#include "visualization_msgs/msg/marker.hpp"
+#include "nav_msgs/msg/path.hpp"
+#include "grid_map_msgs/msg/grid_map.hpp"
+#include "grid_map_core/grid_map_core.hpp"
+#include "grid_map_ros/grid_map_ros.hpp"
+#include "ompl/base/SpaceInformation.h"
+#include "ompl/geometric/planners/rrt/RRT.h"  
+#include "ompl/base/objectives/PathLengthOptimizationObjective.h"
+#include "ompl/geometric/SimpleSetup.h"
+#include "ompl/base/spaces/DubinsStateSpace.h"
+#include "tf2/LinearMath/Quaternion.h"
+#include <string>
+#include <mutex>
 
-#include <grid_map_ros/grid_map_ros.hpp>
-#include <grid_map_msgs/GridMap.h>
-#include <grid_map_core/Polygon.hpp>
-#include <grid_map_core/iterators/PolygonIterator.hpp>
+// 全局变量（仅用基础类型和double）
+rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_vis_pub;
+grid_map::GridMap map_;
+std::mutex map_mutex;
 
-#include <ompl/base/spaces/ReedsSheppStateSpace.h>
-#include <ompl/base/spaces/DubinsStateSpace.h>
-
-#include <ompl/geometric/SimpleSetup.h>
-#include <ompl/base/ScopedState.h>
-#include <ompl/geometric/planners/rrt/RRTConnect.h>
-#include <ompl/geometric/planners/rrt/InformedRRTstar.h>
-#include <boost/program_options.hpp>
-#include <ompl/config.h>
-#include <ompl/base/objectives/PathLengthOptimizationObjective.h>
-#include <ompl/geometric/planners/kpiece/KPIECE1.h>
-
-
-
-#include "hybrid_astar_searcher/calculate_heuristic.h"
-#include "hybrid_astar_searcher/hybrid_astar.h"
-
-
-
-namespace ob = ompl::base;
-namespace og = ompl::geometric;
-using namespace planning;
-using std::vector;
-
-
-ros::Publisher path_vis_pub;
-
-typedef ompl::base::SE2StateSpace::StateType State;
-using namespace grid_map;
-GridMap map_;
-double x_min_, x_max_, y_min_, y_max_, xy_resolution_, theta_resolution_;
-std::unique_ptr<GridSearch> astar_ptr;
-
-void Gridmap_Callback(grid_map_msgs::GridMap msg){
-    if (map_.exists("elevation")) return;
-    std::cout << "receive map" << std::endl; 
-    GridMapRosConverter::fromMessage(msg, map_);
-    std::cout << "FrameId:" << map_.getFrameId() << std::endl;
-    std::cout << "map :" << map_.getLength().x() << std::endl;
-    ROS_INFO("Created map with size %f x %f m (%i x %i cells).",
-    map_.getLength().x(), map_.getLength().y(),
-    map_.getSize()(0), map_.getSize()(1));
-    astar_ptr.reset(new GridSearch(map_));
-
-    xy_resolution_ = map_.getResolution();
-    theta_resolution_ = 0.1;
-    x_min_ = map_.getStartIndex()(0) * xy_resolution_ - 25;
-    x_max_ = x_min_ + map_.getLength().x();
-    y_min_ = map_.getStartIndex()(1) * xy_resolution_ -25;
-    y_max_ = y_min_ + map_.getLength().y();
-
+// 地图回调（增加地图参数日志，便于排查类型问题）
+void Gridmap_Callback(const grid_map_msgs::msg::GridMap::SharedPtr msg) {
+    std::lock_guard<std::mutex> lock(map_mutex);
+    // 显式转换消息到grid_map，确保数据类型匹配
+    grid_map::GridMapRosConverter::fromMessage(*msg, map_);
     
-}   
-
-//小正方形以外可行
-bool isStateValid1(const ob::SpaceInformation *si, const ob::State *state) {
-    const auto *s = state->as<ob::SE2StateSpace::StateType>();
-    double x = s->getX(), y = s->getY();
-
-    return si->satisfiesBounds(s) && (x < -8 || x > -3 || y < 0 || y > 5);
+    // 打印地图关键参数（验证分辨率为double类型，避免隐式类型问题）
+    RCLCPP_INFO(rclcpp::get_logger("ompl_test_node"), 
+        "Received grid map: resolution=%.3f, size_x=%d, size_y=%d",
+        map_.getResolution(),  // double类型
+        map_.getSize()(0),     // int类型（栅格数量X轴）
+        map_.getSize()(1));    // int类型（栅格数量Y轴）
 }
 
-vector<Vec2d> calculateCarBoundingBox(Vec3d pose) {
-    vector<Vec2d> vertices;
-    const double dx1 = std::cos(pose(2)) * 4.9 / 2;
-    const double dy1 = std::sin(pose(2)) * 4.9 / 2;
-    const double dx2 = std::sin(pose(2)) * 2.6 / 2;
-    const double dy2 = -std::cos(pose(2)) * 2.6 / 2;
-    vertices.emplace_back(pose(0) + dx1 + dx2, pose(1) + dy1 + dy2);
-    vertices.emplace_back(pose(0) + dx1 - dx2, pose(1) + dy1 - dy2);
-    vertices.emplace_back(pose(0) - dx1 - dx2, pose(1) - dy1 - dy2);
-    vertices.emplace_back(pose(0) - dx1 + dx2, pose(1) - dy1 + dy2); //顺时针
-    return vertices;
-
-}
-void mod2Pi(double &angle) {
-    if (angle >  M_PI) {
-        angle -= 2 *M_PI;
-    } 
-
-    if (angle < - M_PI) {
-        angle += 2 * M_PI;
-    }
-}
-bool isInMap(double x, double y) {
-    if (x < x_min_ || x > x_max_ ||
-        y < y_min_ || y > y_max_) {
+// 状态有效性检查（核心优化：显式转换坐标→栅格索引，避免Eigen类型混用）
+bool isStateValid(const ompl::base::State* state) {
+    std::lock_guard<std::mutex> lock(map_mutex);
+    // 1. 先检查地图是否加载且包含"elevation"层
+    if (!map_.exists("elevation")) {
+        RCLCPP_DEBUG(rclcpp::get_logger("ompl_test_node"), "Map missing 'elevation' layer");
         return false;
     }
-    return true;
-}
-Vec3i getIndexFromPose(Vec3d pose) {
-    Vec3i index;
-    index(0) = static_cast<int>((pose(0) - x_min_) / xy_resolution_);
-    index(1) = static_cast<int>((pose(1) - y_min_) / xy_resolution_);
-    mod2Pi(pose(2));
-    index(2) = static_cast<int>((pose(2)) / theta_resolution_);
-    return index;
-}
-bool isLinecollision(double x0, double y0, double x1, double y1) {
-    //int check_point_num = static_cast<int>(max(abs(x1 - x0),abs(y1 - y0)) / xy_resolution_) + 1;
-    int check_point_num = static_cast<int>(std::max(abs(x1 - x0),abs(y1 - y0)) / 2) + 1;
 
-    double delta_x = (x1 - x0) / check_point_num;
-    double delta_y = (y1 - y0) / check_point_num;
+    // 2. 提取当前状态的坐标（double类型，符合路径规划精度需求）
+    const auto* dubins_state = state->as<ompl::base::DubinsStateSpace::StateType>();
+    const double x = dubins_state->getX();
+    const double y = dubins_state->getY();
+    const grid_map::Position pos(x, y);  // Eigen::Vector2d（double类型）
 
-    double cur_x = x0;
-    double cur_y = y0;
-    for (int i = 0; i < check_point_num; ++i) {
-        if (!isInMap(cur_x, cur_y)) {
-            return true;
-        }
-
-        Vec3i idx = getIndexFromPose({cur_x, cur_y, 0});
-        if (map_.atPosition("elevation", {cur_x, cur_y}) > 0) {
-            return true;
-        }
-
-        cur_x += delta_x;
-        cur_y += delta_y;
-    }
-    return false;
-}
-
-
-bool validityCheck(std::shared_ptr<Node3d> node) {
-    
-    int node_step_size = node->getStepSize();
-    //cout << "节点里有多少个点：" << node_step_size << endl;
-    const auto traversed_x = node->getXs();
-    const auto traversed_y = node->getYs();
-    const auto traversed_theta = node->getThetas();
-
-    int start_index = 0;
-    if (node_step_size > 1) {  //不止一个节点，有中间节点
-        start_index = 1;   //第一个是上一个节点的x y theta
-    }
-
-    //遍历节点集合里的点
-    for (int i = start_index; i < node_step_size; ++i) {
-        //有超出地图边界的，节点抛弃
-        if (!isInMap(traversed_x[i], traversed_y[i])) {
-            return false;
-        }
-        //生成车的四个顶点
-        auto vertices = calculateCarBoundingBox({traversed_x[i], traversed_y[i], traversed_theta[i]});
-        //遍历四条边是否碰撞
-        for (int i = 0; i < vertices.size(); ++i) {
-            if (isLinecollision(vertices[i].x(), vertices[i].y(), 
-                                vertices[(i+1) % 4].x(), vertices[(i+1) % 4].y())){
-                return false;                    
-            }
-        }
-    }
-    return true;
-
-}
-//地图高度等于0可行
-bool isStateValid2(const std::shared_ptr<ompl::base::SpaceInformation> si, const ob::State *state) {
-    const auto *s = state->as<ob::SE2StateSpace::StateType>();
-    double x = s->getX(), y = s->getY(), theta = s->getYaw();
-    vector<double> vec_x = {x};
-    vector<double> vec_y = {y};
-    vector<double> vec_theta = {theta};
-    
-
-    std::shared_ptr<Node3d> node = std::make_shared<Node3d>(vec_x, vec_y, vec_theta);
-
-    if (!validityCheck(node)) {
+    // 3. 显式检查坐标是否在地图边界内（避免越界访问触发类型转换）
+    if (!map_.isInside(pos)) {
+        RCLCPP_DEBUG(rclcpp::get_logger("ompl_test_node"), 
+            "State (%.2f, %.2f) outside map bounds", x, y);
         return false;
     }
-    return true;
-}
 
-void visPath(std::vector<Eigen::Vector2d> path) {
-    nav_msgs::Path nav_path;
-    nav_path.header.frame_id = "map";
-    nav_path.header.stamp = ros::Time::now();
-    geometry_msgs::PoseStamped pos;
-    for (const auto pose : path) {
-        pos.pose.position.x = pose[0];
-        pos.pose.position.y = pose[1];
-        //std::cout << "x,y:" << pose[0] << " " << pose[1] << std::endl; 
-        nav_path.poses.push_back(pos);
+    // 4. 显式转换坐标→栅格索引（int类型，核心优化点：避免隐式赋值）
+    grid_map::Index grid_index;  // Eigen::Vector2i（int类型）
+    if (!map_.getIndex(pos, grid_index)) {  // 显式转换，失败则返回无效
+        RCLCPP_DEBUG(rclcpp::get_logger("ompl_test_node"), 
+            "Failed to convert (%.2f, %.2f) to grid index", x, y);
+        return false;
     }
-    path_vis_pub.publish(nav_path);
 
+    // 5. 显式检查栅格索引有效性（避免无效索引访问）
+    if (!map_.isValid(grid_index)) {
+        RCLCPP_DEBUG(rclcpp::get_logger("ompl_test_node"), 
+            "Grid index (%d, %d) is invalid", grid_index(0), grid_index(1));
+        return false;
+    }
+
+    // 6. 访问地图数据（确保double类型比较，无类型冲突）
+    const double elevation = map_.at("elevation", grid_index);
+    return elevation < 0.5;  // double vs double，无类型问题
 }
 
-int main(int argc, char **argv) 
-{
-    ros::init(argc, argv, "test ompl");
-    ros::NodeHandle nh;
+int main(int argc, char **argv) {
+    // 1. ROS初始化（无Eigen操作，类型安全）
+    rclcpp::init(argc, argv);
+    auto node = rclcpp::Node::make_shared("ompl_test_node");
+    node->declare_parameter("turning_radius", 3.0);  // 声明参数，便于后续调整
+    double turning_radius;
+    node->get_parameter("turning_radius", turning_radius);
 
-    ros::Subscriber gridmap_sub = nh.subscribe("/grid_map", 1, Gridmap_Callback);
-    ros::Publisher marker_pub = nh.advertise<visualization_msgs::Marker>("rs_path_marker", 10);
+    // 2. 创建发布订阅器（纯ROS消息操作，无类型问题）
+    auto gridmap_sub = node->create_subscription<grid_map_msgs::msg::GridMap>(
+        "/grid_map", 10, Gridmap_Callback);
+    auto marker_pub = node->create_publisher<visualization_msgs::msg::Marker>(
+        "rs_path_marker", 10);
+    path_vis_pub = node->create_publisher<nav_msgs::msg::Path>(
+        "/planned_path", 10);
 
-    path_vis_pub = nh.advertise<nav_msgs::Path>("/path", 1);
-    ob::StateSpacePtr space(std::make_shared<ob::DubinsStateSpace>(3));
+    // 3. OMPL配置（全double类型参数，避免类型混用）
+    // 初始化Dubins状态空间（转弯半径为double，符合车辆模型需求）
+    auto space = std::make_shared<ompl::base::DubinsStateSpace>(turning_radius);
+    // 设置位置边界（全double类型，与坐标精度匹配）
+    ompl::base::RealVectorBounds bounds(2);
+    bounds.setLow(0, -10.0);   // X轴下界
+    bounds.setHigh(0, 10.0);   // X轴上界
+    bounds.setLow(1, -10.0);   // Y轴下界
+    bounds.setHigh(1, 10.0);   // Y轴上界
+    space->setBounds(bounds);
 
-        std::cout << "设置bound" << std::endl;
-        ob::RealVectorBounds bounds(2);
-        bounds.setLow(0, -25);  //参数0-x 1-y
-        bounds.setLow(1, -25);
-        bounds.setHigh(0, 25);
-        bounds.setHigh(1, 25);
-        space->as<ob::SE2StateSpace>()->setBounds(bounds);
-        std::cout << "设置bound结束" << std::endl;
+    // 初始化SimpleSetup，绑定状态有效性检查
+    ompl::geometric::SimpleSetup ss(space);
+    ss.setStateValidityChecker(std::bind(&isStateValid, std::placeholders::_1));
 
-        og::SimpleSetup ss(space);
+    // 4. 设置起点终点（全double类型，与Dubins状态空间匹配）
+    ompl::base::ScopedState<> start(space);
+    start->as<ompl::base::DubinsStateSpace::StateType>()->setX(-5.0);  // X坐标（double）
+    start->as<ompl::base::DubinsStateSpace::StateType>()->setY(0.0);   // Y坐标（double）
+    start->as<ompl::base::DubinsStateSpace::StateType>()->setYaw(0.0); // 航向角（double）
 
-        //设置状态有效性检测
-        ob::SpaceInformationPtr si(std::make_shared<ob::SpaceInformation>(space));
+    ompl::base::ScopedState<> goal(space);
+    goal->as<ompl::base::DubinsStateSpace::StateType>()->setX(5.0);   // X坐标（double）
+    goal->as<ompl::base::DubinsStateSpace::StateType>()->setY(0.0);    // Y坐标（double）
+    goal->as<ompl::base::DubinsStateSpace::StateType>()->setYaw(0.0);  // 航向角（double）
 
-        ob::OptimizationObjectivePtr optimizationObjective(new ob::PathLengthOptimizationObjective(si));
-        ss.setOptimizationObjective(optimizationObjective);
+    ss.setStartAndGoalStates(start, goal);
 
-        auto isStateValid = isStateValid2;
-        ss.setStateValidityChecker([isStateValid, si](const ob::State *state)
-        {
-            return isStateValid(si, state);
-        });
-        ob::ScopedState<> start(space);
-        start[0] = 5;
-        start[1] = 0;
-        start[2] = 3.14;
-                    
-        ob::ScopedState<> goal(space);
-        goal[0] = -19;
-        goal[1] = -18;
-        goal[2] = 2.2;
-                    
-        ss.setStartAndGoalStates(start, goal);
-        std::cout << "起点终点设置完成" << std::endl;
- 
+    // 5. 设置路径优化目标（路径长度最小化，无类型问题）
+    auto objective = std::make_shared<ompl::base::PathLengthOptimizationObjective>(
+        ss.getSpaceInformation());
+    ss.setOptimizationObjective(objective);
 
-    
-
-        // ss.getSpaceInformation()->setStateValidityCheckingResolution(0.005);
-        // ss.setup();
-        // ss.print();
-        // ob::PlannerPtr planner(std::make_shared<og::KPIECE1>(si));
-        //ss.setPlanner(planner);
-
-    std::vector<ob::State*> path_states;
-
- 
-    
-    ros::Rate rate(10);
-    while(ros::ok()) {
-
-    
+    // 6. 主循环（逻辑不变，确保所有数值操作均为double）
+    rclcpp::Rate rate(10);  // 10Hz循环，符合局部规划实时性需求
+    while (rclcpp::ok()) {
+        // 仅当地图就绪时执行规划
         if (map_.exists("elevation")) {
-        std::cout << "求解开始" << std::endl;
-            
+            // 求解规划（1秒超时，避免阻塞主循环）
+            const auto solved = ss.solve(1.0);
+            if (solved) {
+                RCLCPP_INFO(node->get_logger(), "Path found! Interpolating to 50 points");
+                nav_msgs::msg::Path path_msg;
+                path_msg.header.frame_id = "map";
+                path_msg.header.stamp = node->get_clock()->now();
 
-        ob::PlannerStatus solved = ss.solve(1);
-        ss.simplifySolution();
-        og::PathGeometric solution_path =  ss.getSolutionPath();
-        solution_path.interpolate(100);   
+                // 路径插值（提升可视化平滑度，无类型问题）
+                auto path = ss.getSolutionPath();
+                path.interpolate(50);  // 插值为50个点，平衡精度与效率
 
-        path_states = solution_path.getStates();
+                // 转换OMPL路径为ROS Path消息
+                for (const auto& state : path.getStates()) {
+                    const auto* dubins_state = state->as<ompl::base::DubinsStateSpace::StateType>();
+                    geometry_msgs::msg::PoseStamped pose;
+                    pose.header = path_msg.header;
 
-         //画图
-            visualization_msgs::Marker marker;
-            marker.header.frame_id = "map"; // Set the frame ID to match your RVIZ frame
-            marker.header.stamp = ros::Time::now();
-            marker.ns = "rs_path";
-            marker.action = visualization_msgs::Marker::ADD;
-            marker.pose.orientation.w = 1.0;
-            marker.id = 0;
-            marker.type = visualization_msgs::Marker::LINE_STRIP;
-            marker.scale.x = 0.5; // Line width
+                    // 位置赋值（全double类型）
+                    pose.pose.position.x = dubins_state->getX();
+                    pose.pose.position.y = dubins_state->getY();
+                    pose.pose.position.z = 0.0;  // 2D场景，z轴固定为0.0
 
-            // Extract and convert OMPL path points to marker points
-            
-            for (size_t i = 0; i < path_states.size(); ++i)
-            {
-                auto values = path_states[i]->as<ompl::base::SE2StateSpace::StateType>();
-                geometry_msgs::Point point;
-                point.x = values->getX();
-                point.y = values->getY();
-                point.z = 0.0;
-                marker.points.push_back(point);
+                    // 航向角→四元数（TF2操作，无Eigen类型冲突）
+                    tf2::Quaternion q;
+                    q.setRPY(0.0, 0.0, dubins_state->getYaw());  // 仅绕z轴旋转
+                    q.normalize();  // 标准化四元数，确保合法性
+                    pose.pose.orientation.x = q.x();
+                    pose.pose.orientation.y = q.y();
+                    pose.pose.orientation.z = q.z();
+                    pose.pose.orientation.w = q.w();
 
+                    path_msg.poses.push_back(pose);
+                }
+
+                // 发布路径和Marker
+                path_vis_pub->publish(path_msg);
+                
+                visualization_msgs::msg::Marker marker;
+                marker.header = path_msg.header;
+                marker.id = 0;
+                marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+                marker.action = visualization_msgs::msg::Marker::ADD;
+                marker.scale.x = 0.1;  // 线宽0.1m，便于可视化
+                marker.color.r = 1.0;  // 红色
+                marker.color.a = 1.0;  // 不透明
+                for (const auto& pose : path_msg.poses) {
+                    marker.points.push_back(pose.pose.position);
+                }
+                marker_pub->publish(marker);
+
+                // 清除当前解，准备下一次规划
+                ss.clear();
+                ss.setStartAndGoalStates(start, goal);
+            } else {
+                RCLCPP_WARN(node->get_logger(), "No valid path found (timeout 1s)");
             }
-            
-            
-            
-            // Set marker color and opacity
-            marker.color.a = 1.0; // Fully opaque
-            marker.color.r = 1.0; // Red color
-            marker.color.g = 0.0;
-            marker.color.b = 0.0;
-            marker_pub.publish(marker);
+        } else {
+            // 地图未就绪时，每秒打印一次等待日志（避免刷屏）
+            RCLCPP_INFO_THROTTLE(node->get_logger(), *node->get_clock(), 1000, 
+                "Waiting for grid map (missing 'elevation' layer)...");
         }
 
-           
-      
-            
-        ros::spinOnce();
+        // 处理回调队列（非阻塞）
+        rclcpp::spin_some(node);
         rate.sleep();
     }
-        
-    ros::spin();
-    
+
+    // 资源清理
+    rclcpp::shutdown();
     return 0;
 }

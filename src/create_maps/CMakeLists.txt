@@ -1,151 +1,98 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.8)
 project(create_maps)
 
-## Compile as C++11, supported in ROS Kinetic and newer
-# add_compile_options(-std=c++11)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic -std=c++17)
+endif()
 
-## Find catkin macros and libraries
-## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
-## is used, also find other catkin packages
-find_package(ompl REQUIRED)
-if(NOT OMPL_FOUND)
-    message(AUTHOR_WARNING,"Open Motion Planning Library not found")
-endif(NOT OMPL_FOUND)
+# Find dependencies
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)  # 新增：查找 Eigen3（版本≥3.3）
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(grid_map_core REQUIRED)
+find_package(grid_map_ros REQUIRED)
+find_package(grid_map_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(hybrid_astar_searcher REQUIRED)
 
-find_package(catkin REQUIRED COMPONENTS
-  filters
-  geometry_msgs
-  grid_map_core
-  grid_map_filters
-  grid_map_ros
-  grid_map_rviz_plugin
-  grid_map_visualization
-  roscpp
-  rospy
-  hybrid_astar_searcher
-  tf2_ros
-  tf2
+# 【修正1：删除错误的 OMPL_DIR 路径（源码编译的 OMPL 不在 ROS 目录下）】
+# set(OMPL_DIR "/opt/ros/jazzy/share/ompl/cmake")  # 注释或删除此行
+find_package(ompl REQUIRED)  # 自动查找源码编译的 OMPL
 
-)
-
-
-catkin_package(
-#  INCLUDE_DIRS include
-#  LIBRARIES create_maps
-#  CATKIN_DEPENDS filters geometry_msgs grid_map_core grid_map_filters grid_map_ros grid_map_rviz_plugin grid_map_visualization roscpp rospy
-#  DEPENDS system_lib
-)
-
-###########
-## Build ##
-###########
-
-## Specify additional locations of header files
-## Your package locations should be listed before other locations
+# Include header directories
 include_directories(
- include
-  ${catkin_INCLUDE_DIRS}
-  ${CMAKE_SOURCE_DIR}/motion_control/decompUtil
-)
-include_directories(include ${OMPL_INCLUDE_DIRS})
-
-## Declare a C++ library
-# add_library(${PROJECT_NAME}
-#   src/${PROJECT_NAME}/create_maps.cpp
-# )
-
-## Add cmake target dependencies of the library
-## as an example, code may need to be generated before libraries
-## either from message generation or dynamic reconfigure
-# add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-
-## Declare a C++ executable
-## With catkin_make all packages are built within a single CMake context
-## The recommended prefix ensures that target names across packages don't collide
- add_executable(simple_demo_node src/simple_demo_node.cpp)
- add_executable(ompl_test_node src/ompl_test.cpp)
- add_executable(hybrid_astar_test src/hybrid_astar_test.cpp)
-
-
-
-## Rename C++ executable without prefix
-## The above recommended prefix causes long target names, the following renames the
-## target back to the shorter version for ease of user use
-## e.g. "rosrun someones_pkg node" instead of "rosrun someones_pkg someones_pkg_node"
-# set_target_properties(${PROJECT_NAME}_node PROPERTIES OUTPUT_NAME node PREFIX "")
-
-## Add cmake target dependencies of the executable
-## same as for the library above
-# add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-
-## Specify libraries to link a library or executable target against
- target_link_libraries(simple_demo_node
-   ${catkin_LIBRARIES}
- )
- target_link_libraries(ompl_test_node
- ${catkin_LIBRARIES}
- ${OMPL_LIBRARIES}
- hybrid_astar_searcher
+  include
+  ${OMPL_INCLUDE_DIRS}  # 保留：自动获取 OMPL 头文件路径（无需版本号）
+  ${EIGEN3_INCLUDE_DIRS}  # 新增：自动获取 Eigen3 头文件路径
+  # /usr/local/include/ompl-1.6  # 删除：移除版本化硬编码路径
+  /usr/local/include
 )
 
-target_link_libraries(hybrid_astar_test
-${catkin_LIBRARIES}
-${OMPL_LIBRARIES}
-hybrid_astar_searcher
+# Create executables
+add_executable(simple_demo_node src/simple_demo_node.cpp)
+add_executable(ompl_test_node src/ompl_test.cpp)
+add_executable(hybrid_astar_test src/hybrid_astar_test.cpp)
 
+# Link dependencies
+ament_target_dependencies(simple_demo_node
+  rclcpp
+  geometry_msgs
+  grid_map_ros
+  grid_map_msgs
+  tf2
+  tf2_ros
 )
 
-#############
-## Install ##
-#############
+ament_target_dependencies(ompl_test_node
+  rclcpp
+  geometry_msgs
+  nav_msgs
+  visualization_msgs
+  grid_map_ros
+  grid_map_msgs
+  tf2
+  tf2_ros
+  hybrid_astar_searcher
+  # 【修正2：删除此处的 ompl，避免重复依赖】
+)
 
-# all install targets should use catkin DESTINATION variables
-# See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
+ament_target_dependencies(hybrid_astar_test
+  rclcpp
+  geometry_msgs
+  nav_msgs
+  visualization_msgs
+  grid_map_ros
+  grid_map_msgs
+  tf2
+  tf2_ros
+  hybrid_astar_searcher
+  # 【修正2：删除此处的 ompl】
+)
 
-## Mark executable scripts (Python etc.) for installation
-## in contrast to setup.py, you can choose the destination
-# catkin_install_python(PROGRAMS
-#   scripts/my_python_script
-#   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
+# 【修正3：用 OMPL_LIBRARIES 链接，而非 ompl::ompl（源码编译的 OMPL 不生成该目标）】
+# target_link_libraries(ompl_test_node ${OMPL_LIBRARIES})
+# target_link_libraries(hybrid_astar_test ${OMPL_LIBRARIES})
+target_link_libraries(ompl_test_node ${OMPL_LIBRARIES} Eigen3::Eigen)  # 新增 Eigen3::Eigen
+target_link_libraries(hybrid_astar_test ${OMPL_LIBRARIES} Eigen3::Eigen)  # 新增 Eigen3::Eigen
 
-## Mark executables for installation
-## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_executables.html
-# install(TARGETS ${PROJECT_NAME}_node
-#   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
+# Install executables
+install(TARGETS
+  simple_demo_node
+  ompl_test_node
+  hybrid_astar_test
+  DESTINATION lib/${PROJECT_NAME}
+)
 
-## Mark libraries for installation
-## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_libraries.html
-# install(TARGETS ${PROJECT_NAME}
-#   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-# )
+install(DIRECTORY config/
+  DESTINATION share/${PROJECT_NAME}/config
+)
 
-## Mark cpp header files for installation
-# install(DIRECTORY include/${PROJECT_NAME}/
-#   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-#   FILES_MATCHING PATTERN "*.h"
-#   PATTERN ".svn" EXCLUDE
-# )
+install(DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}/launch
+)
 
-## Mark other files for installation (e.g. launch and bag files, etc.)
-# install(FILES
-#   # myfile1
-#   # myfile2
-#   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-# )
-
-#############
-## Testing ##
-#############
-
-## Add gtest based cpp test target and link libraries
-# catkin_add_gtest(${PROJECT_NAME}-test test/test_create_maps.cpp)
-# if(TARGET ${PROJECT_NAME}-test)
-#   target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME})
-# endif()
-
-## Add folders to be run by python nosetests
-# catkin_add_nosetests(test)
+ament_package()

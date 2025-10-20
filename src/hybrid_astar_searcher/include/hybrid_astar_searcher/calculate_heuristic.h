@@ -17,7 +17,7 @@
 #include <memory>
 
 #include <grid_map_core/grid_map_core.hpp>
-#include <grid_map_msgs/GridMap.h>
+#include <grid_map_msgs/msg/grid_map.hpp>
 
 #include "hybrid_astar_searcher/type_defs.h" 
 

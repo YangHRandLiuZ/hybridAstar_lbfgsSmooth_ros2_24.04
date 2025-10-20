@@ -19,7 +19,7 @@
 #include <chrono>
 
 #include <grid_map_core/grid_map_core.hpp>
-#include <grid_map_msgs/GridMap.h>
+#include <grid_map_msgs/msg/grid_map.hpp>
 
 #include <ompl/base/spaces/ReedsSheppStateSpace.h>
 #include <ompl/geometric/SimpleSetup.h>
@@ -52,7 +52,7 @@ struct HybridAstarResult {
 class HybridAstar
 {
 private:
-
+    Visualize visualizer_; 
     double length_ = 4.933;
     double width_ = 2.11;
     double min_turn_radius_ = 5.0538;
@@ -73,7 +73,7 @@ private:
     double x_min_, x_max_, y_min_, y_max_, xy_resolution_, theta_resolution_;
     int map_size_x_, map_size_y_;
     grid_map::GridMap map_;
-    Visualize vis;
+    // Visualize vis;
 
     //penalty 
     double traj_forward_penalty_ = 1.0;
@@ -101,7 +101,7 @@ private:
     std::shared_ptr<ReedShepp> reed_shepp_generator_;
 
 public:
-    HybridAstar(grid_map::GridMap map);
+    // HybridAstar(grid_map::GridMap map);
     ~HybridAstar();
 
     bool plan(Vec3d start_pose, Vec3d goal_pose, HybridAstarResult &result);
@@ -114,6 +114,7 @@ public:
     bool isInMap(double x, double y);
     bool isStateValid2(const ob::SpaceInformation *si, const ob::State *state);
     std::shared_ptr<Node3d> nextNodeGenerator(std::shared_ptr<Node3d> cur_node, int next_node_idx); 
+    HybridAstar(rclcpp::Node::SharedPtr node, grid_map::GridMap map);
 
     double TrajCost(std::shared_ptr<Node3d> cur_node, std::shared_ptr<Node3d> next_node);
     double calculateNodeCost(std::shared_ptr<Node3d> cur_node, std::shared_ptr<Node3d> next_node);

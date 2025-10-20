@@ -1,143 +1,80 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.8)
 project(hybrid_astar_searcher)
 
-## Compile as C++11, supported in ROS Kinetic and newer
-# add_compile_options(-std=c++11)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic -std=c++17)
+endif()
 
-## Find catkin macros and libraries
-## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
-## is used, also find other catkin packages
+# Find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(grid_map_core REQUIRED)
+find_package(grid_map_msgs REQUIRED)
 find_package(ompl REQUIRED)
-if(NOT OMPL_FOUND)
-    message(AUTHOR_WARNING,"Open Motion Planning Library not found")
-endif(NOT OMPL_FOUND)
-
-find_package(catkin REQUIRED COMPONENTS
-  geometry_msgs
-  nav_msgs
-  roscpp
-  std_msgs
-  tf2
-  
-)
+find_package(tf2_geometry_msgs REQUIRED)
 
 
 
-###################################
-## catkin specific configuration ##
-###################################
-## The catkin_package macro generates cmake config files for your package
-## Declare things to be passed to dependent projects
-## INCLUDE_DIRS: uncomment this if your package contains header files
-## LIBRARIES: libraries you create in this project that dependent projects also need
-## CATKIN_DEPENDS: catkin_packages dependent projects also need
-## DEPENDS: system dependencies of this project that dependent projects also need
-catkin_package(
-  INCLUDE_DIRS include
-#  LIBRARIES hybrid_astar_seacher
-  CATKIN_DEPENDS geometry_msgs nav_msgs roscpp std_msgs tf2
-#  DEPENDS system_lib
-)
 
-###########
-## Build ##
-###########
 
-## Specify additional locations of header files
-## Your package locations should be listed before other locations
+# Include header directories
 include_directories(
- include
-  ${catkin_INCLUDE_DIRS}
-  ${CMAKE_SOURCE_DIR}/motion_control/decompUtil
+  include
+  ${EIGEN3_INCLUDE_DIRS}
+  ${OMPL_INCLUDE_DIRS}
 )
 
-## Declare a C++ library
+# Create library
 add_library(${PROJECT_NAME}
-  src/calculate_heuristic.cpp
   src/hybrid_astar.cpp
-  src/dynamicvoronoi.cpp
-  src/bucketedqueue.cpp
   src/smooth.cpp
   src/ReedsSheppPath.cpp
+  src/dynamicvoronoi.cpp
+  src/calculate_heuristic.cpp          
+  src/bucketedqueue.cpp      
 )
 
-## Add cmake target dependencies of the library
-## as an example, code may need to be generated before libraries
-## either from message generation or dynamic reconfigure
-# add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-
-## Declare a C++ executable
-## With catkin_make all packages are built within a single CMake context
-## The recommended prefix ensures that target names across packages don't collide
-# add_executable(${PROJECT_NAME}_node src/hybrid_astar_seacher_node.cpp)
-
-## Rename C++ executable without prefix
-## The above recommended prefix causes long target names, the following renames the
-## target back to the shorter version for ease of user use
-## e.g. "rosrun someones_pkg node" instead of "rosrun someones_pkg someones_pkg_node"
-# set_target_properties(${PROJECT_NAME}_node PROPERTIES OUTPUT_NAME node PREFIX "")
-
-## Add cmake target dependencies of the executable
-## same as for the library above
-# add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-
-## Specify libraries to link a library or executable target against
-target_link_libraries(${PROJECT_NAME}
-  ${catkin_LIBRARIES}
-  ${OMPL_LIBRARIES}
+# Link dependencies
+ament_target_dependencies(${PROJECT_NAME}
+  rclcpp
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_ros  
+  grid_map_core
+  grid_map_msgs
+  nav_msgs
+  visualization_msgs
+  tf2_geometry_msgs  
+)
+target_link_libraries(${PROJECT_NAME} Eigen3::Eigen
+${OMPL_LIBRARIES}
 )
 
-#############
-## Install ##
-#############
+# Install library and headers
+install(TARGETS ${PROJECT_NAME}
+  EXPORT export_${PROJECT_NAME}  # 关键：定义导出目标名，与后续 ament_export_targets 对应
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+  INCLUDES DESTINATION include  # 可选：明确头文件路径，增强依赖传递
+)
+install(DIRECTORY include/${PROJECT_NAME}/
+  DESTINATION include/${PROJECT_NAME}
+)
 
-# all install targets should use catkin DESTINATION variables
-# See http://ros.org/doc/api/catkin/html/adv_user_guide/variables.html
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_dependencies(Eigen3)
+ament_export_dependencies(ompl)
+ament_export_dependencies(grid_map_core)
+ament_export_dependencies(tf2_geometry_msgs)
+ament_export_include_directories(include)
+ament_export_libraries(${PROJECT_NAME})
 
-## Mark executable scripts (Python etc.) for installation
-## in contrast to setup.py, you can choose the destination
-# catkin_install_python(PROGRAMS
-#   scripts/my_python_script
-#   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
-
-## Mark executables for installation
-## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_executables.html
-# install(TARGETS ${PROJECT_NAME}_node
-#   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
-
-## Mark libraries for installation
-## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_libraries.html
-# install(TARGETS ${PROJECT_NAME}
-#   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
-# )
-
-## Mark cpp header files for installation
-# install(DIRECTORY include/${PROJECT_NAME}/
-#   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-#   FILES_MATCHING PATTERN "*.h"
-#   PATTERN ".svn" EXCLUDE
-# )
-
-## Mark other files for installation (e.g. launch and bag files, etc.)
-# install(FILES
-#   # myfile1
-#   # myfile2
-#   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-# )
-
-#############
-## Testing ##
-#############
-
-## Add gtest based cpp test target and link libraries
-# catkin_add_gtest(${PROJECT_NAME}-test test/test_hybrid_astar_seacher.cpp)
-# if(TARGET ${PROJECT_NAME}-test)
-#   target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME})
-# endif()
-
-## Add folders to be run by python nosetests
-# catkin_add_nosetests(test)
+ament_package()  # 原有的ament_package()保留

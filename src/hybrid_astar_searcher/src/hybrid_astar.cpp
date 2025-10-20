@@ -20,7 +20,8 @@ namespace planning
 {
 
 
-HybridAstar::HybridAstar(grid_map::GridMap map) {
+HybridAstar::HybridAstar(rclcpp::Node::SharedPtr node, grid_map::GridMap map) 
+    : visualizer_(node)  {
     map_ = map;
     xy_resolution_ = map.getResolution();
     theta_resolution_ = 0.1;
